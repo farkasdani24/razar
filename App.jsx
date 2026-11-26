@@ -1034,8 +1034,8 @@ export default function App() {
 
               {!closed && (
                 <div className="text-[11px] mt-4" style={{ color: C.muted }}>
-                  Az ár a végleges létszám alapján alakul ki. A jelentkezés az óra kezdete után
-                  30 perccel zár.
+                  Az ár a végleges létszám alapján alakul ki.
+                  {isCoach && " A jelentkezés az óra kezdete után 30 perccel zár."}
                 </div>
               )}
             </>

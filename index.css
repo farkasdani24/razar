@@ -2,6 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Megmondjuk a bongeszonek, hogy sotet a felulet. Ettol lesz vilagos
+   a datum- es idomezok naptar ikonja, es sotet a legorduloo valaszto is. */
+:root { color-scheme: dark; }
+
 html, body, #root { height: 100%; }
 
 body {
