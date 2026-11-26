@@ -174,7 +174,8 @@ create policy razar_settings_coach_all on razar_settings
 --   * irni: csak a ket szamlazasi mezot
 revoke select, insert, update, delete, truncate on razar_kids from anon;
 grant select (id) on razar_kids to anon;
-grant update (billing_name, billing_address) on razar_kids to anon;
+grant update (parent_name, parent_phone, parent_email, billing_name, billing_address)
+  on razar_kids to anon;
 
 create policy razar_kids_parent_select_id on razar_kids
   for select to anon
@@ -184,6 +185,33 @@ create policy razar_kids_parent_billing on razar_kids
   for update to anon
   using (deleted_at is null)
   with check (deleted_at is null);
+
+-- Uj csaladok jelentkezese. A szulo kitolti, de nem kerul be egybol a
+-- nevsorba: az edzo hagyja jova a Gyerekek fulon.
+create table if not exists razar_signups (
+  id uuid primary key default gen_random_uuid(),
+  kid_name text not null,
+  group_name text not null default 'U8-10',
+  parent_name text,
+  parent_phone text,
+  parent_email text,
+  billing_name text,
+  billing_address text,
+  note text,
+  handled_at timestamptz,
+  handled_how text,                              -- felvetve | elvetve
+  created_at timestamptz default now()
+);
+
+alter table razar_signups enable row level security;
+
+revoke select, update, delete, truncate on razar_signups from anon;
+grant insert on razar_signups to anon;
+
+create policy razar_signups_anon_insert on razar_signups
+  for insert to anon with check (true);
+create policy razar_signups_coach_all on razar_signups
+  for all to authenticated using (true) with check (true);
 
 -- naplo: barki irhat bele (a szuloi jelentkezes is naplozodik),
 -- de csak a bejelentkezett edzo olvashatja

@@ -42,6 +42,10 @@ const LOG_LABELS = {
   alkalom_veglegesen_torolve: "Alkalom véglegesen törölve",
   berlet_valtozas: "Bérlet egyenleg változott",
   szamlazasi_adat: "Számlázási adatok megadva",
+  szuloi_adat: "Szülői adatok megadva",
+  jelentkezes_uj_gyerek: "Új gyerek jelentkezett",
+  jelentkezes_elfogadva: "Jelentkezés elfogadva",
+  jelentkezes_elvetve: "Jelentkezés elvetve",
   berlet_eladva: "Bérlet eladva",
   berlet_modositva: "Bérlet módosítva",
   berlet_torolve: "Bérlet törölve",
@@ -252,6 +256,7 @@ export default function App() {
   const [payments, setPayments] = useState([]);       // csak edzonek
   const [passes, setPasses] = useState([]);           // berletek, csak edzonek
   const [passKids, setPassKids] = useState([]);       // melyik berletet ki hasznalhatja
+  const [signups, setSignups] = useState([]);         // uj jelentkezesek, csak edzonek
   const [trashKids, setTrashKids] = useState([]);     // lomtar, csak edzonek
   const [trashLessons, setTrashLessons] = useState([]);
   const [log, setLog] = useState([]);                 // naplo, csak edzonek
@@ -317,13 +322,14 @@ export default function App() {
       });
 
       if (coach) {
-        const [payRes, tKids, tLessons, logRes, passRes, passKidRes] = await Promise.all([
+        const [payRes, tKids, tLessons, logRes, passRes, passKidRes, signupRes] = await Promise.all([
           supabase.from("razar_payments").select("*"),
           supabase.from("razar_kids").select("*").not("deleted_at", "is", null).order("deleted_at", { ascending: false }),
           supabase.from("razar_lessons").select("*").not("deleted_at", "is", null).order("deleted_at", { ascending: false }),
           supabase.from("razar_log").select("*").order("at", { ascending: false }).limit(200),
           supabase.from("razar_passes").select("*").is("deleted_at", null).order("purchased_on", { ascending: false }),
           supabase.from("razar_pass_kids").select("*"),
+          supabase.from("razar_signups").select("*").is("handled_at", null).order("created_at"),
         ]);
         if (payRes.error) throw payRes.error;
         setPayments(payRes.data || []);
@@ -332,9 +338,10 @@ export default function App() {
         setLog(logRes.data || []);
         setPasses(passRes.data || []);
         setPassKids(passKidRes.data || []);
+        setSignups(signupRes.data || []);
       } else {
         setPayments([]); setTrashKids([]); setTrashLessons([]); setLog([]);
-        setPasses([]); setPassKids([]);
+        setPasses([]); setPassKids([]); setSignups([]);
       }
     } catch (e) {
       setErr(e.message || "Nem sikerult betolteni az adatokat.");
@@ -467,16 +474,67 @@ export default function App() {
   /** A szulo elkuldi a szamlazasi adatokat. Visszaolvasni nem tudja oket:
       az adatbazis csak irast enged neki ezen a ket mezon. */
   async function submitBilling(kid, data) {
-    const { error } = await supabase.from("razar_kids")
-      .update({ billing_name: data.billing_name || null, billing_address: data.billing_address || null })
-      .eq("id", kid.id);
+    // Csak azt kuldjuk, amit kitoltottek: egy uresen hagyott mezo nem torli
+    // a mar meglevo adatot.
+    const payload = {};
+    ["parent_name", "parent_phone", "parent_email", "billing_name", "billing_address"]
+      .forEach((k) => { if ((data[k] || "").trim()) payload[k] = data[k].trim(); });
+    if (Object.keys(payload).length === 0) return false;
+
+    const { error } = await supabase.from("razar_kids").update(payload).eq("id", kid.id);
     if (error) { setErr(error.message); return false; }
-    logEvent("szamlazasi_adat", "kid", kid.id, kid.name, null);
+    logEvent("szuloi_adat", "kid", kid.id, kid.name, null);
     const next = { ...billingSent, [kid.id]: data };
     setBillingSent(next);
     try { localStorage.setItem("razar_billing_sent", JSON.stringify(next)); } catch { /* nem baj */ }
     if (isCoach) await loadAll(true);
     return true;
+  }
+
+  /** Uj csalad jelentkezese. Nem kerul be egybol a nevsorba. */
+  async function submitSignup(data) {
+    const { error } = await supabase.from("razar_signups").insert({
+      kid_name: (data.kid_name || "").trim(),
+      group_name: data.group_name || "U8-10",
+      parent_name: data.parent_name || null,
+      parent_phone: data.parent_phone || null,
+      parent_email: data.parent_email || null,
+      billing_name: data.billing_name || null,
+      billing_address: data.billing_address || null,
+      note: data.note || null,
+    });
+    if (error) { setErr(error.message); return false; }
+    logEvent("jelentkezes_uj_gyerek", "signup", null, (data.kid_name || "").trim(), null);
+    if (isCoach) await loadAll(true);
+    return true;
+  }
+
+  /** Az edzo felveszi a jelentkezot a nevsorba. */
+  async function acceptSignup(su) {
+    const { error } = await supabase.from("razar_kids").insert({
+      name: su.kid_name,
+      group_name: su.group_name || "U8-10",
+      parent_name: su.parent_name,
+      parent_phone: su.parent_phone,
+      parent_email: su.parent_email,
+      billing_name: su.billing_name,
+      billing_address: su.billing_address,
+      note: su.note,
+      is_active: true,
+    });
+    if (error) { setErr(error.message); return; }
+    await supabase.from("razar_signups")
+      .update({ handled_at: new Date().toISOString(), handled_how: "felvetve" }).eq("id", su.id);
+    logEvent("jelentkezes_elfogadva", "signup", su.id, su.kid_name, null);
+    await loadAll(true);
+  }
+
+  async function rejectSignup(su) {
+    const { error } = await supabase.from("razar_signups")
+      .update({ handled_at: new Date().toISOString(), handled_how: "elvetve" }).eq("id", su.id);
+    if (error) { setErr(error.message); return; }
+    logEvent("jelentkezes_elvetve", "signup", su.id, su.kid_name, null);
+    await loadAll(true);
   }
 
   async function saveSetting(key, value) {
@@ -765,6 +823,8 @@ export default function App() {
   const [showLog, setShowLog] = useState(false);
   const [passModal, setPassModal] = useState(null);
   const [billingModal, setBillingModal] = useState(null);
+  const [signupOpen, setSignupOpen] = useState(false);
+  const [signupDone, setSignupDone] = useState(false);
   const [billingSent, setBillingSent] = useState(() => {
     try { return JSON.parse(localStorage.getItem("razar_billing_sent") || "{}"); } catch { return {}; }
   });
@@ -905,6 +965,17 @@ export default function App() {
               await deleteLesson(lessonModal.id); setLessonModal(null);
             }
           } : null}
+        />
+      )}
+
+      {signupOpen && (
+        <SignupForm
+          groups={settings.groups}
+          onClose={() => setSignupOpen(false)}
+          onSave={async (d) => {
+            const ok = await submitSignup(d);
+            if (ok) { setSignupOpen(false); setSignupDone(true); }
+          }}
         />
       )}
 
@@ -1201,6 +1272,62 @@ export default function App() {
   function renderKids() {
     return (
       <>
+        {!isCoach && (
+          signupDone ? (
+            <Card style={{ borderColor: `${C.lime}55` }}>
+              <div className="flex items-start gap-2">
+                <Check size={18} style={{ color: C.lime }} className="mt-0.5 shrink-0" />
+                <div>
+                  <div className="font-bold text-sm">Köszönjük, megkaptuk!</div>
+                  <div className="text-[12px] mt-1" style={{ color: C.muted }}>
+                    Az edzők hamarosan felveszik a gyereket a névsorba, és onnantól itt
+                    fog szerepelni.
+                  </div>
+                </div>
+              </div>
+            </Card>
+          ) : (
+            <Btn tone="cyan" className="w-full" onClick={() => setSignupOpen(true)}>
+              <span className="inline-flex items-center gap-1.5"><Plus size={15} /> Új gyerek jelentkezése</span>
+            </Btn>
+          )
+        )}
+
+        {isCoach && signups.length > 0 && (
+          <Card style={{ borderColor: `${C.cyan}66` }}>
+            <div className="flex items-center gap-2 mb-3">
+              <Plus size={16} style={{ color: C.cyan }} />
+              <div className="font-bold text-sm">Új jelentkezések ({signups.length})</div>
+            </div>
+            <div className="space-y-2">
+              {signups.map((su) => (
+                <div key={su.id} className="rounded-xl p-3" style={{ background: C.card2 }}>
+                  <div className="font-semibold text-sm">{su.kid_name}</div>
+                  <div className="text-[11px] mt-0.5" style={{ color: C.muted }}>{su.group_name}</div>
+                  <div className="text-[12px] mt-2 space-y-0.5" style={{ color: C.muted }}>
+                    {su.parent_name && <div>Szülő: <span style={{ color: C.text }}>{su.parent_name}</span></div>}
+                    {su.parent_phone && <div>Telefon: <span style={{ color: C.text }}>{su.parent_phone}</span></div>}
+                    {su.parent_email && <div>E-mail: <span style={{ color: C.text }}>{su.parent_email}</span></div>}
+                    {(su.billing_name || su.billing_address) && (
+                      <div>Számlázás: <span style={{ color: C.text }}>
+                        {[su.billing_name, su.billing_address].filter(Boolean).join(" — ")}</span></div>
+                    )}
+                    {su.note && <div className="italic">{su.note}</div>}
+                  </div>
+                  <div className="flex gap-2 mt-3">
+                    <Btn tone="primary" size="sm" className="flex-1" onClick={() => acceptSignup(su)}>
+                      Felvétel a névsorba
+                    </Btn>
+                    <Btn tone="danger" size="sm" onClick={() => {
+                      if (confirm(`Elveted ${su.kid_name} jelentkezését?`)) rejectSignup(su);
+                    }}>Elvetés</Btn>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
+
         {isCoach && (
           <Btn tone="primary" className="w-full" onClick={() => setKidModal({
             name: "", group_name: settings.groups[0] || "U8-10", parent_name: "",
@@ -1237,7 +1364,7 @@ export default function App() {
                       border: `1px solid ${billingSent[k.id] ? C.lime + "55" : C.cyan + "55"}`,
                     }}
                   >
-                    {billingSent[k.id] ? <><Check size={12} /> Számlázási adatok</> : <>Számlázási adatok</>}
+                    {billingSent[k.id] ? <><Check size={12} /> Adataim</> : <>Adataim megadása</>}
                   </button>
                 )}
                 {isCoach && (
@@ -1290,8 +1417,9 @@ export default function App() {
 
         {!isCoach && (
           <p className="text-[11px] text-center" style={{ color: C.muted }}>
-            A „Számlázási adatok" gombbal a saját gyereked számlázási nevét és címét tudod
-            megadni. Ezt csak az edzők látják — sem te, sem más szülő nem tudja visszanézni.
+            Az „Adataim megadása" gombbal a saját elérhetőségedet és a számlázási adatokat
+            tudod megadni a gyerekednél. Ezeket csak az edzők látják — sem te, sem más szülő
+            nem tudja visszanézni. Ha új gyereket hoznál, használd a fenti jelentkezés gombot.
           </p>
         )}
       </>
@@ -1863,33 +1991,113 @@ function LessonForm({ draft, groups, onClose, onSave, onSeries, onDelete }) {
 }
 
 function BillingForm({ kid, saved, onClose, onSave }) {
-  const [d, setD] = useState(saved || { billing_name: "", billing_address: "" });
+  const [d, setD] = useState(saved || {
+    parent_name: "", parent_phone: "", parent_email: "",
+    billing_name: "", billing_address: "",
+  });
   const set = (k, v) => setD((p) => ({ ...p, [k]: v }));
+  const vanValami = ["parent_name", "parent_phone", "parent_email", "billing_name", "billing_address"]
+    .some((k) => (d[k] || "").trim());
+
   return (
-    <Modal title={`Számlázási adatok — ${kid.name}`} onClose={onClose}>
+    <Modal title={`Adatok — ${kid.name}`} onClose={onClose}>
       <div className="space-y-3">
         <div>
+          <Label>Szülő neve</Label>
+          <input value={d.parent_name || ""} autoFocus onChange={(e) => set("parent_name", e.target.value)} />
+        </div>
+        <div>
+          <Label>Telefonszám</Label>
+          <input value={d.parent_phone || ""} onChange={(e) => set("parent_phone", e.target.value)} placeholder="+36 30 123 4567" />
+        </div>
+        <div>
+          <Label>E-mail cím</Label>
+          <input value={d.parent_email || ""} onChange={(e) => set("parent_email", e.target.value)} />
+        </div>
+        <div className="pt-1" style={{ borderTop: `1px solid ${C.border}` }}>
           <Label>Számlázási név</Label>
-          <input value={d.billing_name || ""} autoFocus
-            onChange={(e) => set("billing_name", e.target.value)}
+          <input value={d.billing_name || ""} onChange={(e) => set("billing_name", e.target.value)}
             placeholder="Akinek a nevére a számla szól" />
         </div>
         <div>
           <Label>Számlázási cím</Label>
-          <textarea rows={3} value={d.billing_address || ""}
-            onChange={(e) => set("billing_address", e.target.value)}
+          <textarea rows={2} value={d.billing_address || ""} onChange={(e) => set("billing_address", e.target.value)}
             placeholder="1234 Budapest, Példa utca 1." />
         </div>
       </div>
-      <Btn tone="primary" className="w-full mt-4"
-        disabled={!d.billing_name?.trim() || !d.billing_address?.trim()}
-        onClick={() => onSave(d)}>
+      <Btn tone="primary" className="w-full mt-4" disabled={!vanValami} onClick={() => onSave(d)}>
         <span className="inline-flex items-center gap-1.5"><Save size={15} /> Elküldés az edzőknek</span>
       </Btn>
       <p className="text-[11px] mt-3" style={{ color: C.muted }}>
         {saved
           ? "Ezt küldted el korábban erről a telefonról. Ha módosítod és újra elküldöd, az edzőknél felülíródik."
           : "Az adatokat csak az edzők látják. Biztonsági okból visszaolvasni nem lehet őket, ezért ha később módosítanál, írd be újra."}
+        {" "}Az üresen hagyott mezők nem törlik azt, amit korábban megadtál.
+      </p>
+    </Modal>
+  );
+}
+
+function SignupForm({ groups, onClose, onSave }) {
+  const [d, setD] = useState({
+    kid_name: "", group_name: (groups && groups[0]) || "U8-10",
+    parent_name: "", parent_phone: "", parent_email: "",
+    billing_name: "", billing_address: "", note: "",
+  });
+  const set = (k, v) => setD((p) => ({ ...p, [k]: v }));
+
+  return (
+    <Modal title="Új gyerek jelentkezése" onClose={onClose}>
+      <p className="text-[12px] mb-4" style={{ color: C.muted }}>
+        Töltsd ki, és az edzők hamarosan felveszik a gyereket a névsorba. Az adatokat
+        csak ők látják.
+      </p>
+      <div className="space-y-3">
+        <div>
+          <Label>Gyerek neve *</Label>
+          <input value={d.kid_name} autoFocus onChange={(e) => set("kid_name", e.target.value)} />
+        </div>
+        <div>
+          <Label>Csoport</Label>
+          <select value={d.group_name} onChange={(e) => set("group_name", e.target.value)}>
+            {(groups || ["U8-10"]).map((g) => <option key={g} value={g}>{g}</option>)}
+          </select>
+        </div>
+        <div>
+          <Label>Szülő neve *</Label>
+          <input value={d.parent_name} onChange={(e) => set("parent_name", e.target.value)} />
+        </div>
+        <div>
+          <Label>Telefonszám *</Label>
+          <input value={d.parent_phone} onChange={(e) => set("parent_phone", e.target.value)} placeholder="+36 30 123 4567" />
+        </div>
+        <div>
+          <Label>E-mail cím</Label>
+          <input value={d.parent_email} onChange={(e) => set("parent_email", e.target.value)} />
+        </div>
+        <div className="pt-1" style={{ borderTop: `1px solid ${C.border}` }}>
+          <Label>Számlázási név</Label>
+          <input value={d.billing_name} onChange={(e) => set("billing_name", e.target.value)}
+            placeholder="Akinek a nevére a számla szól" />
+        </div>
+        <div>
+          <Label>Számlázási cím</Label>
+          <textarea rows={2} value={d.billing_address} onChange={(e) => set("billing_address", e.target.value)}
+            placeholder="1234 Budapest, Példa utca 1." />
+        </div>
+        <div>
+          <Label>Megjegyzés az edzőknek</Label>
+          <textarea rows={2} value={d.note} onChange={(e) => set("note", e.target.value)}
+            placeholder="Pl. mióta korcsolyázik, van-e saját korcsolyája" />
+        </div>
+      </div>
+      <Btn tone="primary" className="w-full mt-4"
+        disabled={!d.kid_name.trim() || !d.parent_name.trim() || !d.parent_phone.trim()}
+        onClick={() => onSave(d)}>
+        <span className="inline-flex items-center gap-1.5"><Save size={15} /> Jelentkezés elküldése</span>
+      </Btn>
+      <p className="text-[11px] mt-2" style={{ color: C.muted }}>
+        A csillaggal jelölt mezők kitöltése kötelező.
       </p>
     </Modal>
   );
