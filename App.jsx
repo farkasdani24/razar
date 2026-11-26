@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { supabase, COACH_EMAIL } from "./lib/supabaseClient";
+import { supabase, COACH_EMAIL } from "./supabaseClient";
 import {
   CalendarDays, Users, Info, Wallet, Lock, Unlock, LogOut, Plus, Pencil,
   Trash2, Check, X, Copy, MapPin, Phone, Mail, Ticket, RefreshCw, ChevronDown,
