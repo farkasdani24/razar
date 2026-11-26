@@ -41,6 +41,7 @@ const LOG_LABELS = {
   alkalom_visszaallitva: "Alkalom visszaállítva",
   alkalom_veglegesen_torolve: "Alkalom véglegesen törölve",
   berlet_valtozas: "Bérlet egyenleg változott",
+  szamlazasi_adat: "Számlázási adatok megadva",
   berlet_eladva: "Bérlet eladva",
   berlet_modositva: "Bérlet módosítva",
   berlet_torolve: "Bérlet törölve",
@@ -463,6 +464,21 @@ export default function App() {
     }
   }
 
+  /** A szulo elkuldi a szamlazasi adatokat. Visszaolvasni nem tudja oket:
+      az adatbazis csak irast enged neki ezen a ket mezon. */
+  async function submitBilling(kid, data) {
+    const { error } = await supabase.from("razar_kids")
+      .update({ billing_name: data.billing_name || null, billing_address: data.billing_address || null })
+      .eq("id", kid.id);
+    if (error) { setErr(error.message); return false; }
+    logEvent("szamlazasi_adat", "kid", kid.id, kid.name, null);
+    const next = { ...billingSent, [kid.id]: data };
+    setBillingSent(next);
+    try { localStorage.setItem("razar_billing_sent", JSON.stringify(next)); } catch { /* nem baj */ }
+    if (isCoach) await loadAll(true);
+    return true;
+  }
+
   async function saveSetting(key, value) {
     setSettings((s) => ({ ...s, [key]: value }));
     const { error } = await supabase.from("razar_settings").upsert({ key, value });
@@ -748,6 +764,10 @@ export default function App() {
   const [showTrash, setShowTrash] = useState(false);
   const [showLog, setShowLog] = useState(false);
   const [passModal, setPassModal] = useState(null);
+  const [billingModal, setBillingModal] = useState(null);
+  const [billingSent, setBillingSent] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("razar_billing_sent") || "{}"); } catch { return {}; }
+  });
 
   const TABS = [
     { id: "lesson", label: "Alkalmak", icon: CalendarDays },
@@ -885,6 +905,15 @@ export default function App() {
               await deleteLesson(lessonModal.id); setLessonModal(null);
             }
           } : null}
+        />
+      )}
+
+      {billingModal && (
+        <BillingForm
+          kid={billingModal}
+          saved={billingSent[billingModal.id]}
+          onClose={() => setBillingModal(null)}
+          onSave={async (d) => { const ok = await submitBilling(billingModal, d); if (ok) setBillingModal(null); }}
         />
       )}
 
@@ -1198,6 +1227,19 @@ export default function App() {
                     {k.group_name}{k.is_active === false ? " · inaktív" : ""}
                   </div>
                 </div>
+                {!isCoach && (
+                  <button
+                    onClick={() => setBillingModal(k)}
+                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-1 shrink-0"
+                    style={{
+                      background: C.card2,
+                      color: billingSent[k.id] ? C.lime : C.cyan,
+                      border: `1px solid ${billingSent[k.id] ? C.lime + "55" : C.cyan + "55"}`,
+                    }}
+                  >
+                    {billingSent[k.id] ? <><Check size={12} /> Számlázási adatok</> : <>Számlázási adatok</>}
+                  </button>
+                )}
                 {isCoach && (
                   <>
                     {(() => {
@@ -1216,7 +1258,7 @@ export default function App() {
                   </>
                 )}
               </div>
-              {isCoach && (k.parent_name || k.parent_phone || k.parent_email || k.billing_address) && (
+              {isCoach && (
                 <div className="mt-2.5 pt-2.5 text-[12px] space-y-1" style={{ borderTop: `1px solid ${C.border}`, color: C.muted }}>
                   {k.parent_name && <div>Szülő: <span style={{ color: C.text }}>{k.parent_name}</span></div>}
                   {k.parent_phone && (
@@ -1229,14 +1271,16 @@ export default function App() {
                       <Mail size={12} /> {k.parent_email}
                     </a></div>
                   )}
-                  {(k.billing_name || k.billing_address) && (
-                    <div className="pt-1">
-                      Számlázási adatok:{" "}
+                  <div className="pt-1">
+                    Számlázási adatok:{" "}
+                    {(k.billing_name || k.billing_address) ? (
                       <span style={{ color: C.text }}>
                         {[k.billing_name, k.billing_address].filter(Boolean).join(" — ")}
                       </span>
-                    </div>
-                  )}
+                    ) : (
+                      <span style={{ color: C.amber }}>még nincs megadva</span>
+                    )}
+                  </div>
                   {k.note && <div className="italic">{k.note}</div>}
                 </div>
               )}
@@ -1246,7 +1290,8 @@ export default function App() {
 
         {!isCoach && (
           <p className="text-[11px] text-center" style={{ color: C.muted }}>
-            A szülők elérhetősége és a bérletek állása csak az edzők belépése után látszik.
+            A „Számlázási adatok" gombbal a saját gyereked számlázási nevét és címét tudod
+            megadni. Ezt csak az edzők látják — sem te, sem más szülő nem tudja visszanézni.
           </p>
         )}
       </>
@@ -1813,6 +1858,39 @@ function LessonForm({ draft, groups, onClose, onSave, onSeries, onDelete }) {
         </Btn>
         {onDelete && <Btn tone="danger" onClick={onDelete}><Trash2 size={15} /></Btn>}
       </div>
+    </Modal>
+  );
+}
+
+function BillingForm({ kid, saved, onClose, onSave }) {
+  const [d, setD] = useState(saved || { billing_name: "", billing_address: "" });
+  const set = (k, v) => setD((p) => ({ ...p, [k]: v }));
+  return (
+    <Modal title={`Számlázási adatok — ${kid.name}`} onClose={onClose}>
+      <div className="space-y-3">
+        <div>
+          <Label>Számlázási név</Label>
+          <input value={d.billing_name || ""} autoFocus
+            onChange={(e) => set("billing_name", e.target.value)}
+            placeholder="Akinek a nevére a számla szól" />
+        </div>
+        <div>
+          <Label>Számlázási cím</Label>
+          <textarea rows={3} value={d.billing_address || ""}
+            onChange={(e) => set("billing_address", e.target.value)}
+            placeholder="1234 Budapest, Példa utca 1." />
+        </div>
+      </div>
+      <Btn tone="primary" className="w-full mt-4"
+        disabled={!d.billing_name?.trim() || !d.billing_address?.trim()}
+        onClick={() => onSave(d)}>
+        <span className="inline-flex items-center gap-1.5"><Save size={15} /> Elküldés az edzőknek</span>
+      </Btn>
+      <p className="text-[11px] mt-3" style={{ color: C.muted }}>
+        {saved
+          ? "Ezt küldted el korábban erről a telefonról. Ha módosítod és újra elküldöd, az edzőknél felülíródik."
+          : "Az adatokat csak az edzők látják. Biztonsági okból visszaolvasni nem lehet őket, ezért ha később módosítanál, írd be újra."}
+      </p>
     </Modal>
   );
 }

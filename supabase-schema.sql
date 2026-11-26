@@ -167,6 +167,24 @@ create policy razar_settings_public_read on razar_settings
 create policy razar_settings_coach_all on razar_settings
   for all to authenticated using (true) with check (true);
 
+-- A szulo megadhatja a gyereke szamlazasi adatait, de semmit nem tud
+-- visszaolvasni. Eloszor elvesszuk tole a tabla osszes jogat, majd
+-- visszaadunk pontosan annyit, amennyi a mentes muvelethez kell:
+--   * olvasni: csak az azonositot (enelkul az UPDATE nem talalna meg a sort)
+--   * irni: csak a ket szamlazasi mezot
+revoke select, insert, update, delete, truncate on razar_kids from anon;
+grant select (id) on razar_kids to anon;
+grant update (billing_name, billing_address) on razar_kids to anon;
+
+create policy razar_kids_parent_select_id on razar_kids
+  for select to anon
+  using (deleted_at is null);
+
+create policy razar_kids_parent_billing on razar_kids
+  for update to anon
+  using (deleted_at is null)
+  with check (deleted_at is null);
+
 -- naplo: barki irhat bele (a szuloi jelentkezes is naplozodik),
 -- de csak a bejelentkezett edzo olvashatja
 create policy razar_log_anyone_insert on razar_log
