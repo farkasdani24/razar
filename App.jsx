@@ -3,7 +3,7 @@ import { supabase, COACH_EMAIL } from "./supabaseClient";
 import {
   CalendarDays, Users, Info, Wallet, Lock, Unlock, LogOut, Plus, Pencil,
   Trash2, Check, X, Copy, MapPin, Phone, Mail, Ticket, RefreshCw, ChevronDown,
-  ChevronRight, AlertTriangle, Clock, Save,
+  ChevronRight, AlertTriangle, Clock, Save, DoorOpen,
 } from "lucide-react";
 
 /* ============================================================
@@ -498,6 +498,7 @@ export default function App() {
       start_time: draft.start_time,
       end_time: draft.end_time,
       location: draft.location,
+      locker_room: draft.locker_room || null,
       group_name: draft.group_name || "U8-10",
       status: draft.status || "open",
       note: draft.note || null,
@@ -524,6 +525,7 @@ export default function App() {
         start_time: draft.start_time,
         end_time: draft.end_time,
         location: draft.location,
+        locker_room: draft.locker_room || null,
         group_name: draft.group_name || "U8-10",
         status: "open",
       });
@@ -638,8 +640,7 @@ export default function App() {
   const [passModal, setPassModal] = useState(null);
 
   const TABS = [
-    { id: "lesson", label: "Óra", icon: CalendarDays },
-    { id: "lessons", label: "Alkalmak", icon: Clock },
+    { id: "lesson", label: "Alkalmak", icon: CalendarDays },
     { id: "kids", label: "Gyerekek", icon: Users },
     { id: "info", label: "Infó", icon: Info },
     ...(isCoach ? [{ id: "money", label: "Pénzügy", icon: Wallet }] : []),
@@ -696,7 +697,6 @@ export default function App() {
 
       <div className="px-4 pt-4 space-y-4">
         {tab === "lesson" && renderLessonView()}
-        {tab === "lessons" && renderLessonsList()}
         {tab === "kids" && renderKids()}
         {tab === "info" && renderInfo()}
         {tab === "money" && isCoach && renderMoney()}
@@ -808,12 +808,15 @@ export default function App() {
     const lesson = selectedLesson;
     if (!lesson) {
       return (
-        <Card>
-          <Empty>
-            Még nincs felvéve alkalom.<br />
-            {isCoach ? "Az „Alkalmak” fülön tudsz újat létrehozni." : "Az edzők hamarosan feltöltik."}
-          </Empty>
-        </Card>
+        <>
+          <Card>
+            <Empty>
+              Még nincs felvéve alkalom.<br />
+              {isCoach ? "Hozz létre egyet az alábbi gombbal." : "Az edzők hamarosan feltöltik."}
+            </Empty>
+          </Card>
+          {renderLessonsList()}
+        </>
       );
     }
 
@@ -841,6 +844,12 @@ export default function App() {
               <div className="text-sm mt-1" style={{ color: C.muted }}>
                 {lesson.start_time}–{lesson.end_time} · {lesson.location}
               </div>
+              {lesson.locker_room && (
+                <div className="inline-flex items-center gap-1.5 mt-2 px-3 py-1.5 rounded-full text-sm font-bold"
+                  style={{ background: C.card2, color: C.cyan }}>
+                  <DoorOpen size={14} /> {lesson.locker_room}. öltöző
+                </div>
+              )}
             </div>
             {isCoach && (
               <button onClick={() => setLessonModal({ ...lesson })} style={{ color: C.muted }} className="p-1">
@@ -978,14 +987,18 @@ export default function App() {
           })}
         </div>
 
-        <div className="text-center text-[11px] pb-2" style={{ color: C.muted }}>
+        <div className="text-center text-[11px]" style={{ color: C.muted }}>
           Jön: {yesList.length} · Nem jön: {noList.length} · Nem válaszolt: {noAnswer.length}
+        </div>
+
+        <div className="pt-4 mt-2 space-y-4" style={{ borderTop: `1px solid ${C.border}` }}>
+          {renderLessonsList()}
         </div>
       </>
     );
   }
 
-  /* ---------- 2. ALKALMAK ---------- */
+  /* ---------- Az alkalmak listaja (a fo nezet aljan) ---------- */
   function renderLessonsList() {
     const row = (l) => {
       const count = headcountOf(l.id);
@@ -994,14 +1007,15 @@ export default function App() {
       return (
         <button
           key={l.id}
-          onClick={() => { setSelectedLessonId(l.id); setTab("lesson"); }}
+          onClick={() => { setSelectedLessonId(l.id); window.scrollTo({ top: 0, behavior: "smooth" }); }}
           className="w-full rounded-2xl px-4 py-3 flex items-center gap-3 text-left"
           style={{ background: C.card, border: `1px solid ${l.id === selectedLesson?.id ? C.lime + "66" : C.border}` }}
         >
           <div className="flex-1 min-w-0">
             <div className="font-bold text-sm">{fmtDateShort(l.date)}</div>
             <div className="text-[11px] mt-0.5" style={{ color: C.muted }}>
-              {l.start_time}–{l.end_time} · {l.location} · {l.group_name}
+              {l.start_time}–{l.end_time} · {l.location}
+              {l.locker_room ? ` · ${l.locker_room}. öltöző` : ""}
             </div>
           </div>
           <div className="text-right shrink-0">
@@ -1026,7 +1040,7 @@ export default function App() {
         {isCoach && (
           <div className="flex gap-2">
             <Btn tone="primary" className="flex-1" onClick={() => setLessonModal({
-              date: nextWeekdayISO(2), start_time: "17:00", end_time: "18:00",
+              date: nextWeekdayISO(2), start_time: "16:00", end_time: "16:50",
               location: info.location.split("\n")[0] || "Óbudai Jégpálya",
               group_name: settings.groups[0] || "U8-10", status: "open",
             })}>
@@ -1036,9 +1050,11 @@ export default function App() {
         )}
 
         <div>
-          <div className="text-xs font-bold mb-2" style={{ color: C.muted }}>KÖVETKEZŐ ALKALMAK</div>
+          <div className="text-xs font-bold mb-2" style={{ color: C.muted }}>TOVÁBBI ALKALMAK</div>
           <div className="space-y-2">
-            {upcoming.length === 0 ? <Card><Empty>Nincs közelgő alkalom.</Empty></Card> : upcoming.map(row)}
+            {upcoming.length === 0
+              ? <Card><Empty>Nincs közelgő alkalom.</Empty></Card>
+              : upcoming.map(row)}
           </div>
         </div>
 
@@ -1229,7 +1245,7 @@ export default function App() {
             </Card>
 
             <Card>
-              <div className="font-bold text-sm mb-2">Tedd ki a telefonod kezdőképernyőjére</div>
+              <div className="font-bold text-sm mb-2">Tedd ki alkalmazásként a telefonod kezdőképernyőjére</div>
               <div className="text-sm" style={{ color: C.muted }}>
                 <b style={{ color: C.text }}>iPhone:</b> nyisd meg Safariban, alul a megosztás ikon,
                 majd „Főképernyőhöz adás”.<br />
@@ -1538,6 +1554,14 @@ function LessonForm({ draft, groups, onClose, onSave, onSeries, onDelete }) {
           <div className="flex-1"><Label>Vége</Label><input type="time" value={d.end_time || ""} onChange={(e) => set("end_time", e.target.value)} /></div>
         </div>
         <div><Label>Helyszín</Label><input value={d.location || ""} onChange={(e) => set("location", e.target.value)} /></div>
+        <div>
+          <Label>Öltöző</Label>
+          <select value={d.locker_room || ""} onChange={(e) => set("locker_room", e.target.value)}>
+            <option value="">Nincs megadva</option>
+            <option value="3">3-as öltöző</option>
+            <option value="4">4-es öltöző</option>
+          </select>
+        </div>
         <div>
           <Label>Csoport</Label>
           <select value={d.group_name || "U8-10"} onChange={(e) => set("group_name", e.target.value)}>
