@@ -2087,8 +2087,7 @@ function SignupForm({ groups, onClose, onSave }) {
         </div>
         <div>
           <Label>Megjegyzés az edzőknek</Label>
-          <textarea rows={2} value={d.note} onChange={(e) => set("note", e.target.value)}
-            placeholder="Pl. mióta korcsolyázik, van-e saját korcsolyája" />
+          <textarea rows={2} value={d.note} onChange={(e) => set("note", e.target.value)} />
         </div>
       </div>
       <Btn tone="primary" className="w-full mt-4"
