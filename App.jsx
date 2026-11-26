@@ -41,6 +41,9 @@ const LOG_LABELS = {
   alkalom_visszaallitva: "Alkalom visszaállítva",
   alkalom_veglegesen_torolve: "Alkalom véglegesen törölve",
   berlet_valtozas: "Bérlet egyenleg változott",
+  berlet_eladva: "Bérlet eladva",
+  berlet_modositva: "Bérlet módosítva",
+  berlet_torolve: "Bérlet törölve",
   fizetes: "Fizetés rögzítve",
   beallitas_modositva: "Beállítás módosítva",
   edzo_belepett: "Edző belépett",
@@ -55,6 +58,11 @@ const DEFAULT_PRICING = {
     { min: 5, drop_in: 8000, pass_extra: 2000 },
   ],
 };
+
+const DEFAULT_PASS_TYPES = [
+  { sessions: 5, price: 25000, weeks: 6 },
+  { sessions: 10, price: 45000, weeks: 12 },
+];
 
 const DEFAULT_INFO = {
   location_title: "Helyszín",
@@ -103,6 +111,11 @@ function fmtDateShort(dateStr) {
   return `${String(d.getMonth() + 1).padStart(2, "0")}. ${String(d.getDate()).padStart(2, "0")}. ${DAYS_HU[d.getDay()].slice(0, 2)}.`;
 }
 
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 function nextWeekdayISO(weekday = 2, from = new Date()) {
   const d = new Date(from);
   d.setHours(0, 0, 0, 0);
@@ -115,6 +128,21 @@ function addDaysISO(iso, days) {
   const d = new Date(iso + "T00:00:00");
   d.setDate(d.getDate() + days);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Uj berlet alapertelmezett adatai a kivalasztott tipusbol. */
+function newPassDraft(type) {
+  const ma = todayISO();
+  return {
+    total_sessions: type?.sessions ?? 5,
+    price: type?.price ?? 0,
+    purchased_on: ma,
+    expires_on: addDaysISO(ma, (type?.weeks ?? 6) * 7),
+    paid: false,
+    paid_method: "transfer",
+    kid_ids: [],
+    note: "",
+  };
 }
 
 function initials(name) {
@@ -221,6 +249,8 @@ export default function App() {
   const [lessons, setLessons] = useState([]);
   const [attendance, setAttendance] = useState([]);   // {lesson_id, kid_id, status}
   const [payments, setPayments] = useState([]);       // csak edzonek
+  const [passes, setPasses] = useState([]);           // berletek, csak edzonek
+  const [passKids, setPassKids] = useState([]);       // melyik berletet ki hasznalhatja
   const [trashKids, setTrashKids] = useState([]);     // lomtar, csak edzonek
   const [trashLessons, setTrashLessons] = useState([]);
   const [log, setLog] = useState([]);                 // naplo, csak edzonek
@@ -239,6 +269,7 @@ export default function App() {
 
   const pricing = settings.pricing || DEFAULT_PRICING;
   const info = { ...DEFAULT_INFO, ...(settings.info || {}) };
+  const passTypes = settings.pass_types || DEFAULT_PASS_TYPES;
 
   /* --- naplozas: minden valtozas nyoma --- */
   const logEvent = useCallback(async (action, entity, entityId, label, details) => {
@@ -281,22 +312,28 @@ export default function App() {
         pricing: s.pricing || DEFAULT_PRICING,
         info: { ...DEFAULT_INFO, ...(s.info || {}) },
         groups: s.groups || ["U8-10"],
+        pass_types: s.pass_types || DEFAULT_PASS_TYPES,
       });
 
       if (coach) {
-        const [payRes, tKids, tLessons, logRes] = await Promise.all([
+        const [payRes, tKids, tLessons, logRes, passRes, passKidRes] = await Promise.all([
           supabase.from("razar_payments").select("*"),
           supabase.from("razar_kids").select("*").not("deleted_at", "is", null).order("deleted_at", { ascending: false }),
           supabase.from("razar_lessons").select("*").not("deleted_at", "is", null).order("deleted_at", { ascending: false }),
           supabase.from("razar_log").select("*").order("at", { ascending: false }).limit(200),
+          supabase.from("razar_passes").select("*").is("deleted_at", null).order("purchased_on", { ascending: false }),
+          supabase.from("razar_pass_kids").select("*"),
         ]);
         if (payRes.error) throw payRes.error;
         setPayments(payRes.data || []);
         setTrashKids(tKids.data || []);
         setTrashLessons(tLessons.data || []);
         setLog(logRes.data || []);
+        setPasses(passRes.data || []);
+        setPassKids(passKidRes.data || []);
       } else {
         setPayments([]); setTrashKids([]); setTrashLessons([]); setLog([]);
+        setPasses([]); setPassKids([]);
       }
     } catch (e) {
       setErr(e.message || "Nem sikerult betolteni az adatokat.");
@@ -440,7 +477,8 @@ export default function App() {
       parent_name: draft.parent_name || null,
       parent_phone: draft.parent_phone || null,
       parent_email: draft.parent_email || null,
-      pass_sessions_left: Number(draft.pass_sessions_left) || 0,
+      billing_name: draft.billing_name || null,
+      billing_address: draft.billing_address || null,
       is_active: draft.is_active !== false,
       note: draft.note || null,
     };
@@ -483,12 +521,54 @@ export default function App() {
     await loadAll(true);
   }
 
-  async function addPassSessions(kid, count) {
-    const next = Math.max(0, (kid.pass_sessions_left || 0) + Number(count));
-    const { error } = await supabase.from("razar_kids").update({ pass_sessions_left: next }).eq("id", kid.id);
+  /* ---------- Berletek ----------
+     Egy berlet onallo egyseg: sajat vasarlasi datuma, lejarata es ara van,
+     es tobb gyerek is hasznalhatja (testverek kozos berlete). A felhasznalt
+     alkalmakat a fizetesek sorai tartjak nyilvan. */
+
+  async function savePass(draft) {
+    const payload = {
+      label: draft.label || null,
+      total_sessions: Number(draft.total_sessions) || 0,
+      price: Number(draft.price) || 0,
+      purchased_on: draft.purchased_on,
+      expires_on: draft.expires_on,
+      paid: !!draft.paid,
+      paid_method: draft.paid_method || null,
+      paid_at: draft.paid ? (draft.paid_at || new Date().toISOString()) : null,
+      note: draft.note || null,
+    };
+    let passId = draft.id;
+    if (passId) {
+      const { error } = await supabase.from("razar_passes").update(payload).eq("id", passId);
+      if (error) { setErr(error.message); return false; }
+    } else {
+      const { data, error } = await supabase.from("razar_passes").insert(payload).select().single();
+      if (error) { setErr(error.message); return false; }
+      passId = data?.id;
+    }
+
+    // kik hasznalhatjak
+    const wanted = draft.kid_ids || [];
+    await supabase.from("razar_pass_kids").delete().eq("pass_id", passId);
+    if (wanted.length) {
+      const { error } = await supabase.from("razar_pass_kids")
+        .insert(wanted.map((kid_id) => ({ pass_id: passId, kid_id })));
+      if (error) { setErr(error.message); return false; }
+    }
+
+    const nevek = wanted.map((id) => kids.find((k) => k.id === id)?.name).filter(Boolean).join(", ");
+    logEvent(draft.id ? "berlet_modositva" : "berlet_eladva", "pass", passId,
+      `${payload.total_sessions} alkalom — ${nevek}`, payload);
+    await loadAll(true);
+    return true;
+  }
+
+  async function deletePass(pass) {
+    const { error } = await supabase.from("razar_passes")
+      .update({ deleted_at: new Date().toISOString() }).eq("id", pass.id);
     if (error) { setErr(error.message); return; }
-    logEvent("berlet_valtozas", "kid", kid.id, kid.name,
-      { elotte: kid.pass_sessions_left || 0, utana: next, valtozas: Number(count) });
+    logEvent("berlet_torolve", "pass", pass.id, `${pass.total_sessions} alkalom`, pass);
     await loadAll(true);
   }
 
@@ -562,18 +642,44 @@ export default function App() {
     await loadAll(true);
   }
 
+  /** Egy berletbol mennyi alkalom maradt (a kifizetett, berletes orak szama alapjan). */
+  const passRemaining = useCallback((pass) => {
+    const used = payments.filter(
+      (p) => p.pass_id === pass.id && p.paid && p.method === "pass"
+    ).length;
+    return (pass.total_sessions || 0) - used;
+  }, [payments]);
+
+  /** Ki hasznalhatja ezt a berletet. */
+  const passKidIds = useCallback(
+    (passId) => passKids.filter((x) => x.pass_id === passId).map((x) => x.kid_id),
+    [passKids]
+  );
+
+  /** A gyerek hasznalhato berlete egy adott napra: ami meg nem jart le es van rajta alkalom. */
+  const usablePass = useCallback((kidId, dateISO) => {
+    const mine = passes.filter((p) => passKidIds(p.id).includes(kidId));
+    const ok = mine.filter((p) => p.expires_on >= dateISO && passRemaining(p) > 0);
+    ok.sort((a, b) => a.expires_on.localeCompare(b.expires_on)); // a leghamarabb lejaro fogy elobb
+    return ok[0] || null;
+  }, [passes, passKidIds, passRemaining]);
+
   /** Mennyit kell fizetnie ennek a gyereknek ezen az oran. */
   const dueFor = useCallback((lesson, kid) => {
     const tier = tierFor(headcountOf(lesson.id), pricing);
-    if (!tier || lesson.status === "cancelled") return { amount: 0, tier: null, byPass: false };
+    if (!tier || lesson.status === "cancelled") {
+      return { amount: 0, tier: null, byPass: false, pass: null };
+    }
     const existing = payIndex[`${lesson.id}|${kid.id}`];
-    const byPass = existing ? existing.method === "pass" : (kid.pass_sessions_left || 0) > 0;
+    const pass = usablePass(kid.id, lesson.date);
+    const byPass = existing ? existing.method === "pass" : !!pass;
     return {
       amount: byPass ? tier.pass_extra : tier.drop_in,
       tier,
       byPass,
+      pass: existing?.pass_id ? passes.find((p) => p.id === existing.pass_id) || pass : pass,
     };
-  }, [headcountOf, pricing, payIndex]);
+  }, [headcountOf, pricing, payIndex, usablePass, passes]);
 
   async function setPayment(lesson, kid, patch) {
     const key = `${lesson.id}|${kid.id}`;
@@ -585,23 +691,31 @@ export default function App() {
       amount: due.amount,
       method: due.byPass ? "pass" : null,
       paid: false,
-      used_pass: false,
+      pass_id: due.pass?.id || null,
     };
     const next = { ...base, ...patch };
 
-    // osszeg ujraszamolasa, ha a mod valtozott
     const tier = tierFor(headcountOf(lesson.id), pricing);
     if (tier && patch.method !== undefined) {
       next.amount = patch.method === "pass" ? tier.pass_extra : tier.drop_in;
     }
-    next.paid_at = next.paid ? (base.paid_at || new Date().toISOString()) : null;
 
-    // berlet alkalom levonasa / visszairasa
-    const shouldUsePass = next.method === "pass" && next.paid;
-    let passDelta = 0;
-    if (shouldUsePass && !base.used_pass) passDelta = -1;
-    if (!shouldUsePass && base.used_pass) passDelta = +1;
-    next.used_pass = shouldUsePass;
+    // berletes fizetesnel el kell donteni, melyik berletbol megy le az alkalom
+    if (next.method === "pass") {
+      if (!next.pass_id) {
+        const p = usablePass(kid.id, lesson.date);
+        next.pass_id = p?.id || null;
+      }
+      if (!next.pass_id && next.paid) {
+        setErr(`${kid.name} nevéhez nincs érvényes bérlet erre a napra. Vegyél fel egyet a Pénzügy fülön, vagy válassz másik fizetési módot.`);
+        return;
+      }
+    } else {
+      next.pass_id = null;
+    }
+
+    next.paid_at = next.paid ? (base.paid_at || new Date().toISOString()) : null;
+    next.used_pass = next.method === "pass" && next.paid;
 
     const { error } = await supabase.from("razar_payments").upsert({
       lesson_id: next.lesson_id,
@@ -610,20 +724,16 @@ export default function App() {
       method: next.method,
       paid: next.paid,
       used_pass: next.used_pass,
+      pass_id: next.pass_id,
       paid_at: next.paid_at,
       note: next.note || null,
     });
     if (error) { setErr(error.message); return; }
 
     logEvent("fizetes", "payment", kid.id,
-      `${kid.name} — ${lesson.date}: ${next.paid ? "fizetve" : "nincs fizetve"} (${fmtHUF(next.amount)})`,
-      { mod: next.method, osszeg: next.amount, fizetve: next.paid });
+      `${kid.name} — ${lesson.date}: ${next.paid ? "fizetve" : "nincs fizetve"} (${fmtHUF(next.amount)}${next.method === "pass" ? ", bérletből" : ""})`,
+      { mod: next.method, osszeg: next.amount, fizetve: next.paid, berlet: next.pass_id });
 
-    if (passDelta !== 0) {
-      const current = kids.find((k) => k.id === kid.id);
-      const newLeft = Math.max(0, (current?.pass_sessions_left || 0) + passDelta);
-      await supabase.from("razar_kids").update({ pass_sessions_left: newLeft }).eq("id", kid.id);
-    }
     await loadAll(true);
   }
 
@@ -779,26 +889,16 @@ export default function App() {
       )}
 
       {passModal && (
-        <Modal title={`Bérlet — ${passModal.name}`} onClose={() => setPassModal(null)}>
-          <div className="text-sm mb-3" style={{ color: C.muted }}>
-            Jelenlegi egyenleg: <b style={{ color: C.lime }}>{passModal.pass_sessions_left || 0} alkalom</b>
-          </div>
-          <Label>Hány alkalmat adunk hozzá?</Label>
-          <div className="flex gap-2 flex-wrap mb-4">
-            {[1, 4, 5, 8, 10].map((n) => (
-              <Btn key={n} tone="ghost" size="sm" onClick={async () => { await addPassSessions(passModal, n); setPassModal(null); }}>
-                + {n}
-              </Btn>
-            ))}
-            <Btn tone="danger" size="sm" onClick={async () => { await addPassSessions(passModal, -1); setPassModal(null); }}>
-              − 1
-            </Btn>
-          </div>
-          <p className="text-[11px]" style={{ color: C.muted }}>
-            A bérlet alkalmai automatikusan fogynak, amikor a Pénzügy fülön „bérletből” módra
-            állítod és kipipálod a fizetést.
-          </p>
-        </Modal>
+        <PassForm
+          draft={passModal}
+          kids={activeKids}
+          passTypes={passTypes}
+          onClose={() => setPassModal(null)}
+          onSave={async (d) => { const ok = await savePass(d); if (ok) setPassModal(null); }}
+          onDelete={passModal.id ? async () => {
+            if (confirm("Biztosan törlöd ezt a bérletet?")) { await deletePass(passModal); setPassModal(null); }
+          } : null}
+        />
       )}
     </div>
   );
@@ -1075,7 +1175,8 @@ export default function App() {
         {isCoach && (
           <Btn tone="primary" className="w-full" onClick={() => setKidModal({
             name: "", group_name: settings.groups[0] || "U8-10", parent_name: "",
-            parent_phone: "", parent_email: "", pass_sessions_left: 0, is_active: true, note: "",
+            parent_phone: "", parent_email: "", billing_name: "", billing_address: "",
+            is_active: true, note: "",
           })}>
             <span className="inline-flex items-center gap-1.5"><Plus size={15} /> Új gyerek</span>
           </Btn>
@@ -1099,18 +1200,23 @@ export default function App() {
                 </div>
                 {isCoach && (
                   <>
-                    <button onClick={() => setPassModal(k)}
-                      className="px-2.5 py-1 rounded-lg text-[11px] font-bold inline-flex items-center gap-1"
-                      style={{ background: C.card2, color: (k.pass_sessions_left || 0) > 0 ? C.cyan : C.muted }}>
-                      <Ticket size={12} /> {k.pass_sessions_left || 0}
-                    </button>
+                    {(() => {
+                      const pass = usablePass(k.id, todayISO());
+                      const left = pass ? passRemaining(pass) : 0;
+                      return (
+                        <div className="px-2.5 py-1 rounded-lg text-[11px] font-bold inline-flex items-center gap-1"
+                          style={{ background: C.card2, color: left > 0 ? C.cyan : C.muted }}>
+                          <Ticket size={12} /> {left}
+                        </div>
+                      );
+                    })()}
                     <button onClick={() => setKidModal({ ...k })} style={{ color: C.muted }} className="p-1.5">
                       <Pencil size={15} />
                     </button>
                   </>
                 )}
               </div>
-              {isCoach && (k.parent_name || k.parent_phone || k.parent_email) && (
+              {isCoach && (k.parent_name || k.parent_phone || k.parent_email || k.billing_address) && (
                 <div className="mt-2.5 pt-2.5 text-[12px] space-y-1" style={{ borderTop: `1px solid ${C.border}`, color: C.muted }}>
                   {k.parent_name && <div>Szülő: <span style={{ color: C.text }}>{k.parent_name}</span></div>}
                   {k.parent_phone && (
@@ -1122,6 +1228,14 @@ export default function App() {
                     <div><a href={`mailto:${k.parent_email}`} className="inline-flex items-center gap-1.5" style={{ color: C.cyan }}>
                       <Mail size={12} /> {k.parent_email}
                     </a></div>
+                  )}
+                  {(k.billing_name || k.billing_address) && (
+                    <div className="pt-1">
+                      Számlázási adatok:{" "}
+                      <span style={{ color: C.text }}>
+                        {[k.billing_name, k.billing_address].filter(Boolean).join(" — ")}
+                      </span>
+                    </div>
                   )}
                   {k.note && <div className="italic">{k.note}</div>}
                 </div>
@@ -1221,7 +1335,24 @@ export default function App() {
                 <Ticket size={16} style={{ color: C.lime }} />
                 <div className="font-bold text-sm">Bérlet</div>
               </div>
-              <div className="text-sm whitespace-pre-line" style={{ color: C.muted }}>{info.pass_info}</div>
+              <div className="space-y-2">
+                {passTypes.map((t, i) => (
+                  <div key={i} className="flex items-center justify-between text-sm">
+                    <div style={{ color: C.muted }}>{t.sessions} alkalmas</div>
+                    <div className="text-right">
+                      <div className="font-bold">{fmtHUF(t.price)}</div>
+                      <div className="text-[11px]" style={{ color: C.cyan }}>{t.weeks} hétig használható</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {info.pass_info && info.pass_info !== DEFAULT_INFO.pass_info && (
+                <div className="text-sm whitespace-pre-line mt-3 pt-3"
+                  style={{ color: C.muted, borderTop: `1px solid ${C.border}` }}>{info.pass_info}</div>
+              )}
+              <p className="text-[11px] mt-3" style={{ color: C.muted }}>
+                A bérlet testvérek között közösen is használható.
+              </p>
             </Card>
 
             <Card style={{ borderColor: `${C.lime}33` }}>
@@ -1265,7 +1396,12 @@ export default function App() {
         )}
 
         {priceEdit && isCoach && (
-          <PriceForm pricing={pricing} onSave={async (v) => { await saveSetting("pricing", v); setPriceEdit(false); }} />
+          <PriceForm
+            pricing={pricing}
+            passTypes={passTypes}
+            onSavePasses={async (v) => { await saveSetting("pass_types", v); }}
+            onSave={async (v) => { await saveSetting("pricing", v); setPriceEdit(false); }}
+          />
         )}
 
         {isCoach && (
@@ -1367,12 +1503,15 @@ export default function App() {
         const p = payIndex[`${l.id}|${k.id}`];
         const amount = p
           ? (p.amount || 0)
-          : ((k.pass_sessions_left || 0) > 0 ? t.pass_extra : t.drop_in);
+          : (usablePass(k.id, l.date) ? t.pass_extra : t.drop_in);
         if (p?.paid) paid += amount; else owed += amount;
       });
       return { kid: k, owed, paid };
     });
-    const totalOwed = summary.reduce((s, r) => s + r.owed, 0);
+    const berletTartozas = passes
+      .filter((p) => !p.paid)
+      .reduce((s, p) => s + (p.price || 0), 0);
+    const totalOwed = summary.reduce((s, r) => s + r.owed, 0) + berletTartozas;
 
     const attendingKids = lesson
       ? kids.filter((k) => attIndex[`${lesson.id}|${k.id}`] === "yes")
@@ -1386,6 +1525,11 @@ export default function App() {
           <div className="text-3xl font-extrabold mt-1" style={{ color: totalOwed > 0 ? C.amber : C.lime }}>
             {fmtHUF(totalOwed)}
           </div>
+          {berletTartozas > 0 && (
+            <div className="text-[11px] mt-1" style={{ color: C.muted }}>
+              ebből {fmtHUF(berletTartozas)} ki nem fizetett bérlet
+            </div>
+          )}
         </Card>
 
         {/* --- egy alkalom elszamolasa --- */}
@@ -1424,7 +1568,9 @@ export default function App() {
                       <div className="flex-1 min-w-0">
                         <div className="font-semibold text-sm truncate">{k.name}</div>
                         <div className="text-[11px]" style={{ color: C.muted }}>
-                          bérlet egyenleg: {k.pass_sessions_left || 0} alkalom
+                          {due.pass
+                            ? `bérlet: ${passRemaining(due.pass)} alkalom, ${fmtDateShort(due.pass.expires_on)}-ig`
+                            : "nincs érvényes bérlete"}
                         </div>
                       </div>
                       <div className="text-base font-extrabold" style={{ color: paid ? C.lime : C.text }}>
@@ -1459,9 +1605,10 @@ export default function App() {
                       ))}
                     </div>
                     {method === "pass" && (
-                      <div className="text-[11px] mt-2" style={{ color: C.cyan }}>
-                        Kipipálva 1 alkalom lejön a bérletből
-                        {tier.pass_extra > 0 ? `, és ${fmtHUF(tier.pass_extra)} felárat fizet.` : "."}
+                      <div className="text-[11px] mt-2" style={{ color: due.pass ? C.cyan : C.amber }}>
+                        {due.pass
+                          ? <>Kipipálva 1 alkalom lejön erről a bérletről{tier.pass_extra > 0 ? `, és ${fmtHUF(tier.pass_extra)} felárat fizet.` : "."}</>
+                          : "Ehhez a naphoz nincs érvényes bérlete — vegyél fel egyet lent, vagy válassz más fizetési módot."}
                       </div>
                     )}
                   </div>
@@ -1494,6 +1641,68 @@ export default function App() {
           </div>
         </Card>
 
+        {/* --- berletek --- */}
+        <Card>
+          <div className="flex items-center gap-2 mb-3">
+            <Ticket size={16} style={{ color: C.cyan }} />
+            <div className="font-bold text-sm flex-1">Bérletek</div>
+          </div>
+
+          <Btn tone="cyan" className="w-full mb-3" onClick={() => setPassModal(newPassDraft(passTypes[0]))}>
+            <span className="inline-flex items-center gap-1.5"><Plus size={15} /> Bérlet eladása</span>
+          </Btn>
+
+          {passes.length === 0 && <Empty>Még nincs eladott bérlet.</Empty>}
+
+          <div className="space-y-2">
+            {passes.map((pass) => {
+              const left = passRemaining(pass);
+              const ids = passKidIds(pass.id);
+              const nevek = ids.map((id) => kids.find((k) => k.id === id)?.name).filter(Boolean);
+              const lejart = pass.expires_on < todayISO();
+              const hasznalat = ids.map((id) => ({
+                nev: kids.find((k) => k.id === id)?.name || "?",
+                db: payments.filter((p) => p.pass_id === pass.id && p.paid && p.method === "pass" && p.kid_id === id).length,
+              })).filter((x) => x.db > 0);
+
+              return (
+                <div key={pass.id} className="rounded-xl p-3"
+                  style={{ background: C.card2, border: `1px solid ${lejart ? C.border : left > 0 ? C.cyan + "44" : C.border}` }}>
+                  <div className="flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-semibold text-sm">
+                        {pass.total_sessions} alkalmas bérlet
+                        {lejart && <span className="ml-2 text-[11px]" style={{ color: C.red }}>lejárt</span>}
+                      </div>
+                      <div className="text-[11px] mt-0.5" style={{ color: C.muted }}>
+                        {nevek.join(", ") || "nincs hozzárendelve"}
+                      </div>
+                      <div className="text-[11px] mt-1" style={{ color: C.muted }}>
+                        {fmtDateShort(pass.purchased_on)} — {fmtDateShort(pass.expires_on)}-ig · {fmtHUF(pass.price)}
+                        {pass.paid
+                          ? <span style={{ color: C.lime }}> · befizetve</span>
+                          : <span style={{ color: C.amber }}> · nincs befizetve</span>}
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-xl font-extrabold" style={{ color: lejart || left <= 0 ? C.muted : C.cyan }}>{left}</div>
+                      <div className="text-[10px]" style={{ color: C.muted }}>alkalom van</div>
+                    </div>
+                    <button onClick={() => setPassModal({ ...pass, kid_ids: ids })} style={{ color: C.muted }} className="p-1">
+                      <Pencil size={15} />
+                    </button>
+                  </div>
+                  {hasznalat.length > 0 && (
+                    <div className="mt-2 pt-2 text-[11px]" style={{ borderTop: `1px solid ${C.border}`, color: C.muted }}>
+                      Felhasználva: {hasznalat.map((x) => `${x.nev} ${x.db}`).join(" · ")}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+
         <p className="text-[11px] text-center pb-2" style={{ color: C.muted }}>
           Ezt az oldalt csak bejelentkezve lehet megnyitni. A szülők böngészőjéből a fizetési
           adatok nem tölthetők le.
@@ -1522,7 +1731,8 @@ function KidForm({ draft, groups, onClose, onSave, onDelete }) {
         <div><Label>Szülő neve</Label><input value={d.parent_name || ""} onChange={(e) => set("parent_name", e.target.value)} /></div>
         <div><Label>Szülő telefonszáma</Label><input value={d.parent_phone || ""} onChange={(e) => set("parent_phone", e.target.value)} placeholder="+36 30 123 4567" /></div>
         <div><Label>Szülő e-mail címe</Label><input value={d.parent_email || ""} onChange={(e) => set("parent_email", e.target.value)} /></div>
-        <div><Label>Bérlet egyenleg (alkalom)</Label><input type="number" value={d.pass_sessions_left ?? 0} onChange={(e) => set("pass_sessions_left", e.target.value)} /></div>
+        <div><Label>Számlázási név</Label><input value={d.billing_name || ""} onChange={(e) => set("billing_name", e.target.value)} placeholder="Akinek a nevére a számla szól" /></div>
+        <div><Label>Számlázási cím</Label><textarea rows={2} value={d.billing_address || ""} onChange={(e) => set("billing_address", e.target.value)} placeholder="1234 Budapest, Példa utca 1." /></div>
         <div><Label>Megjegyzés</Label><textarea rows={2} value={d.note || ""} onChange={(e) => set("note", e.target.value)} /></div>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" className="w-4 h-4" style={{ width: 16, height: 16 }}
@@ -1607,6 +1817,136 @@ function LessonForm({ draft, groups, onClose, onSave, onSeries, onDelete }) {
   );
 }
 
+function PassForm({ draft, kids, passTypes, onClose, onSave, onDelete }) {
+  const [d, setD] = useState(draft);
+  const set = (k, v) => setD((p) => ({ ...p, [k]: v }));
+
+  /** Tipus valasztasakor az alkalmak szama, az ar es a lejarat is kitoltodik. */
+  const chooseType = (t) =>
+    setD((p) => ({
+      ...p,
+      total_sessions: t.sessions,
+      price: t.price,
+      expires_on: addDaysISO(p.purchased_on || todayISO(), t.weeks * 7),
+    }));
+
+  /** A vasarlas datumanak valtozasakor a lejarat is csuszik. */
+  const changeBought = (date) =>
+    setD((p) => {
+      const t = passTypes.find((x) => x.sessions === Number(p.total_sessions));
+      return { ...p, purchased_on: date, expires_on: t ? addDaysISO(date, t.weeks * 7) : p.expires_on };
+    });
+
+  const toggleKid = (id) =>
+    setD((p) => {
+      const cur = p.kid_ids || [];
+      return { ...p, kid_ids: cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id] };
+    });
+
+  return (
+    <Modal title={draft.id ? "Bérlet szerkesztése" : "Bérlet eladása"} onClose={onClose}>
+      <div className="space-y-3">
+        <div>
+          <Label>Melyik bérlet?</Label>
+          <div className="flex gap-2">
+            {passTypes.map((t, i) => {
+              const on = Number(d.total_sessions) === t.sessions;
+              return (
+                <button
+                  key={i}
+                  onClick={() => chooseType(t)}
+                  className="flex-1 py-2.5 rounded-xl text-xs font-bold"
+                  style={{
+                    background: on ? C.cyan : C.card2,
+                    color: on ? "#0A0A0A" : C.muted,
+                    border: `1px solid ${on ? C.cyan : C.border}`,
+                  }}
+                >
+                  {t.sessions} alkalom<br />
+                  <span className="font-normal">{fmtHUF(t.price)} · {t.weeks} hét</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="flex gap-2">
+          <div className="flex-1"><Label>Vásárlás napja</Label>
+            <input type="date" value={d.purchased_on || ""} onChange={(e) => changeBought(e.target.value)} /></div>
+          <div className="flex-1"><Label>Eddig használható</Label>
+            <input type="date" value={d.expires_on || ""} onChange={(e) => set("expires_on", e.target.value)} /></div>
+        </div>
+
+        <div className="flex gap-2">
+          <div className="flex-1"><Label>Alkalmak száma</Label>
+            <input type="number" value={d.total_sessions ?? 0} onChange={(e) => set("total_sessions", e.target.value)} /></div>
+          <div className="flex-1"><Label>Ár</Label>
+            <input type="number" value={d.price ?? 0} onChange={(e) => set("price", e.target.value)} /></div>
+        </div>
+
+        <div>
+          <Label>Ki használhatja? (testvérek közösen is)</Label>
+          <div className="rounded-xl p-2 max-h-48 overflow-y-auto" style={{ background: C.card2, border: `1px solid ${C.border}` }}>
+            {kids.length === 0 && <div className="text-xs p-2" style={{ color: C.muted }}>Még nincs felvéve gyerek.</div>}
+            {kids.map((k) => {
+              const on = (d.kid_ids || []).includes(k.id);
+              return (
+                <label key={k.id} className="flex items-center gap-2 px-2 py-2 text-sm cursor-pointer">
+                  <input type="checkbox" checked={on} onChange={() => toggleKid(k.id)} style={{ width: 16, height: 16 }} />
+                  <span style={{ color: on ? C.text : C.muted }}>{k.name}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <Label>Ki van fizetve?</Label>
+          <div className="flex gap-2">
+            {[
+              { id: false, label: "Még nem" },
+              { id: "cash", label: "Készpénz" },
+              { id: "transfer", label: "Utalás" },
+            ].map((m) => {
+              const on = m.id === false ? !d.paid : (d.paid && d.paid_method === m.id);
+              return (
+                <button
+                  key={String(m.id)}
+                  onClick={() => (m.id === false ? setD((p) => ({ ...p, paid: false })) : setD((p) => ({ ...p, paid: true, paid_method: m.id })))}
+                  className="flex-1 py-2 rounded-lg text-[11px] font-bold"
+                  style={{
+                    background: on ? (m.id === false ? C.card2 : C.card) : "transparent",
+                    color: on ? (m.id === false ? C.amber : C.lime) : C.muted,
+                    border: `1px solid ${on ? (m.id === false ? C.amber + "66" : C.lime + "66") : C.border}`,
+                  }}
+                >
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div><Label>Megjegyzés</Label><textarea rows={2} value={d.note || ""} onChange={(e) => set("note", e.target.value)} /></div>
+      </div>
+
+      <div className="flex gap-2 mt-5">
+        <Btn tone="primary" className="flex-1"
+          disabled={!d.purchased_on || !d.expires_on || !(d.kid_ids || []).length}
+          onClick={() => onSave(d)}>
+          <span className="inline-flex items-center gap-1.5"><Save size={15} /> Mentés</span>
+        </Btn>
+        {onDelete && <Btn tone="danger" onClick={onDelete}><Trash2 size={15} /></Btn>}
+      </div>
+      {!(d.kid_ids || []).length && (
+        <p className="text-[11px] mt-2" style={{ color: C.amber }}>
+          Válaszd ki, ki használhatja a bérletet.
+        </p>
+      )}
+    </Modal>
+  );
+}
+
 function InfoForm({ info, onSave }) {
   const [d, setD] = useState(info);
   const set = (k, v) => setD((p) => ({ ...p, [k]: v }));
@@ -1630,8 +1970,11 @@ function InfoForm({ info, onSave }) {
   );
 }
 
-function PriceForm({ pricing, onSave }) {
+function PriceForm({ pricing, passTypes, onSave, onSavePasses }) {
   const [d, setD] = useState(JSON.parse(JSON.stringify(pricing)));
+  const [pt, setPt] = useState(JSON.parse(JSON.stringify(passTypes)));
+  const setPassType = (i, k, v) =>
+    setPt((p) => { const a = [...p]; a[i] = { ...a[i], [k]: Number(v) || 0 }; return a; });
   const setTier = (i, k, v) =>
     setD((p) => {
       const tiers = [...p.tiers];
@@ -1660,7 +2003,21 @@ function PriceForm({ pricing, onSave }) {
           <input type="number" value={d.min_headcount} onChange={(e) => setD((p) => ({ ...p, min_headcount: Number(e.target.value) || 0 }))} />
         </div>
       </div>
-      <Btn tone="primary" className="w-full mt-4" onClick={() => onSave(d)}>
+
+      <div className="font-bold text-sm mt-5 mb-3 pt-4" style={{ borderTop: `1px solid ${C.border}` }}>Bérletek</div>
+      <div className="space-y-4">
+        {pt.map((t, i) => (
+          <div key={i} className="rounded-xl p-3" style={{ background: C.card2 }}>
+            <div className="flex gap-2">
+              <div className="w-20"><Label>Alkalom</Label><input type="number" value={t.sessions} onChange={(e) => setPassType(i, "sessions", e.target.value)} /></div>
+              <div className="flex-1"><Label>Ár</Label><input type="number" value={t.price} onChange={(e) => setPassType(i, "price", e.target.value)} /></div>
+              <div className="w-20"><Label>Hét</Label><input type="number" value={t.weeks} onChange={(e) => setPassType(i, "weeks", e.target.value)} /></div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <Btn tone="primary" className="w-full mt-4" onClick={async () => { await onSavePasses(pt); onSave(d); }}>
         <span className="inline-flex items-center gap-1.5"><Save size={15} /> Árak mentése</span>
       </Btn>
     </Card>

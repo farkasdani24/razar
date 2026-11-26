@@ -23,6 +23,8 @@ create table if not exists razar_kids (
   pass_sessions_left integer not null default 0,
   is_active boolean not null default true,
   note text,
+  billing_name text,                             -- szamlazasi nev
+  billing_address text,                          -- szamlazasi cim
   sort_order integer not null default 0,
   deleted_at timestamptz,                        -- lomtar
   created_at timestamptz default now()
@@ -31,9 +33,10 @@ create table if not exists razar_kids (
 create table if not exists razar_lessons (
   id uuid primary key default gen_random_uuid(),
   date date not null,
-  start_time text not null default '17:00',
-  end_time text not null default '18:00',
+  start_time text not null default '16:00',
+  end_time text not null default '16:50',
   location text not null default 'Óbudai Jégpálya',
+  locker_room text,                              -- 3 vagy 4
   group_name text not null default 'U8-10',
   status text not null default 'open',           -- open | cancelled
   note text,
@@ -57,8 +60,33 @@ create table if not exists razar_payments (
   paid boolean not null default false,
   used_pass boolean not null default false,
   paid_at timestamptz,
+  pass_id uuid,                                  -- melyik berletbol ment le az alkalom
   note text,
   primary key (lesson_id, kid_id)
+);
+
+-- Berletek. Egy berlet onallo egyseg: sajat vasarlasi datummal, lejarattal
+-- es arral. Tobb gyerek is hasznalhatja (testverek kozos berlete).
+create table if not exists razar_passes (
+  id uuid primary key default gen_random_uuid(),
+  label text,
+  total_sessions integer not null,
+  price integer not null default 0,
+  purchased_on date not null default current_date,
+  expires_on date not null,
+  paid boolean not null default false,
+  paid_method text,                              -- cash | transfer
+  paid_at timestamptz,
+  note text,
+  deleted_at timestamptz,
+  created_at timestamptz default now()
+);
+
+-- ki hasznalhatja az adott berletet
+create table if not exists razar_pass_kids (
+  pass_id uuid not null references razar_passes(id) on delete cascade,
+  kid_id  uuid not null references razar_kids(id)   on delete cascade,
+  primary key (pass_id, kid_id)
 );
 
 create table if not exists razar_settings (
@@ -99,6 +127,14 @@ alter table razar_attendance enable row level security;
 alter table razar_payments   enable row level security;
 alter table razar_settings   enable row level security;
 alter table razar_log        enable row level security;
+alter table razar_passes     enable row level security;
+alter table razar_pass_kids  enable row level security;
+
+-- berletek: penzugyi adat, csak bejelentkezve
+create policy razar_passes_coach_all on razar_passes
+  for all to authenticated using (true) with check (true);
+create policy razar_pass_kids_coach_all on razar_pass_kids
+  for all to authenticated using (true) with check (true);
 
 -- gyerekek teljes adata: csak bejelentkezett edzonek
 create policy razar_kids_coach_all on razar_kids
@@ -145,7 +181,8 @@ create policy razar_log_coach_delete on razar_log
 insert into razar_settings (key, value) values
   ('pricing', '{"min_headcount":5,"tiers":[{"min":7,"drop_in":6000,"pass_extra":0},{"min":6,"drop_in":7000,"pass_extra":1000},{"min":5,"drop_in":8000,"pass_extra":2000}]}'::jsonb),
   ('info', '{"location_title":"Helyszín","location":"Óbudai Jégpálya","map_url":"","schedule":"Minden kedden","coaches":"Anna\nZsolt","pass_info":"A bérlet részleteit hamarosan kitöltjük.","transfer_name":"Szalma-Baráth Anna","transfer_account":"11600006-00000002-08354301","extra":""}'::jsonb),
-  ('groups', '["U8-10"]'::jsonb)
+  ('groups', '["U8-10"]'::jsonb),
+  ('pass_types', '[{"sessions":5,"price":25000,"weeks":6},{"sessions":10,"price":45000,"weeks":12}]'::jsonb)
 on conflict (key) do nothing;
 
 -- --- Edzoi belepes --------------------------------------------
