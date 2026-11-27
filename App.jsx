@@ -278,6 +278,8 @@ export default function App() {
   const info = { ...DEFAULT_INFO, ...(settings.info || {}) };
   const passTypes = settings.pass_types || DEFAULT_PASS_TYPES;
   const groups = settings.groups && settings.groups.length ? settings.groups : ["U8-10"];
+  /** Csoportonkenti alapertelmezes uj alkalomhoz: melyik nap, hany oratol. */
+  const groupDefaults = settings.group_defaults || {};
   /** Melyik csoportot nezzuk eppen. Telefononkent megjegyezzuk. */
   const group = groupPick && groups.includes(groupPick) ? groupPick : groups[0];
 
@@ -323,6 +325,7 @@ export default function App() {
         info: { ...DEFAULT_INFO, ...(s.info || {}) },
         groups: s.groups || ["U8-10"],
         pass_types: s.pass_types || DEFAULT_PASS_TYPES,
+        group_defaults: s.group_defaults || {},
       });
 
       if (coach) {
@@ -1284,11 +1287,16 @@ export default function App() {
       <>
         {isCoach && (
           <div className="flex gap-2">
-            <Btn tone="primary" className="flex-1" onClick={() => setLessonModal({
-              date: nextWeekdayISO(2), start_time: "16:00", end_time: "16:50",
-              location: info.location.split("\n")[0] || "Óbudai Jégpálya",
-              group_name: group, status: "open",
-            })}>
+            <Btn tone="primary" className="flex-1" onClick={() => {
+              const gd = groupDefaults[group] || {};
+              setLessonModal({
+                date: nextWeekdayISO(gd.weekday ?? 2),
+                start_time: gd.start || "16:00",
+                end_time: gd.end || "16:50",
+                location: info.location.split("\n")[0] || "Óbudai Jégcsarnok",
+                group_name: group, status: "open",
+              });
+            }}>
               <span className="inline-flex items-center gap-1.5"><Plus size={15} /> Új alkalom</span>
             </Btn>
           </div>
