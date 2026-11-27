@@ -939,6 +939,11 @@ export default function App() {
         {tab === "money" && isCoach && renderMoney()}
       </div>
 
+      {/* ---------- Lablec ---------- */}
+      <div className="px-4 pt-10 pb-2 text-center text-[11px]" style={{ color: C.muted }}>
+        Razar Skating Skills - Az App-ot készítette: farkasdani #24
+      </div>
+
       {/* ---------- Also menu ---------- */}
       <div
         className="fixed bottom-0 left-0 right-0 z-30 px-2 pt-2 pb-[max(8px,env(safe-area-inset-bottom))] flex"
