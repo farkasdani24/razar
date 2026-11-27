@@ -265,6 +265,7 @@ export default function App() {
   const [tab, setTab] = useState("lesson");
   const [selectedLessonId, setSelectedLessonId] = useState(null);
   const [myKidId, setMyKidId] = useState(localGet("razar_my_kid"));
+  const [groupPick, setGroupPick] = useState(localGet("razar_group"));
   const [now, setNow] = useState(new Date());
   const actorNameRef = useRef("szülő");
 
@@ -276,6 +277,9 @@ export default function App() {
   const pricing = settings.pricing || DEFAULT_PRICING;
   const info = { ...DEFAULT_INFO, ...(settings.info || {}) };
   const passTypes = settings.pass_types || DEFAULT_PASS_TYPES;
+  const groups = settings.groups && settings.groups.length ? settings.groups : ["U8-10"];
+  /** Melyik csoportot nezzuk eppen. Telefononkent megjegyezzuk. */
+  const group = groupPick && groups.includes(groupPick) ? groupPick : groups[0];
 
   /* --- naplozas: minden valtozas nyoma --- */
   const logEvent = useCallback(async (action, entity, entityId, label, details) => {
@@ -383,6 +387,15 @@ export default function App() {
 
   /* --- szarmaztatott adatok --- */
   const activeKids = useMemo(() => kids.filter((k) => k.is_active !== false), [kids]);
+  /** Csak a kivalasztott csoport alkalmai es gyerekei. */
+  const groupLessons = useMemo(
+    () => lessons.filter((l) => (l.group_name || groups[0]) === group),
+    [lessons, group, groups]
+  );
+  const groupKids = useMemo(
+    () => kids.filter((k) => (k.group_name || groups[0]) === group),
+    [kids, group, groups]
+  );
 
   const attIndex = useMemo(() => {
     const m = {};
@@ -402,17 +415,17 @@ export default function App() {
   );
 
   const upcoming = useMemo(
-    () => lessons.filter((l) => !isClosed(l, now)).sort((a, b) => a.date.localeCompare(b.date)),
-    [lessons, now]
+    () => groupLessons.filter((l) => !isClosed(l, now)).sort((a, b) => a.date.localeCompare(b.date)),
+    [groupLessons, now]
   );
   const past = useMemo(
-    () => lessons.filter((l) => isClosed(l, now)).sort((a, b) => b.date.localeCompare(a.date)),
-    [lessons, now]
+    () => groupLessons.filter((l) => isClosed(l, now)).sort((a, b) => b.date.localeCompare(a.date)),
+    [groupLessons, now]
   );
 
   const defaultLesson = upcoming[0] || past[0] || null;
   const selectedLesson =
-    lessons.find((l) => l.id === selectedLessonId) || defaultLesson;
+    groupLessons.find((l) => l.id === selectedLessonId) || defaultLesson;
 
   /* --- muveletek --- */
   async function login() {
@@ -435,6 +448,12 @@ export default function App() {
       ? (kids.find((k) => k.id === myKidId)?.name || "szülő")
       : "szülő";
     setTab("lesson");
+  }
+
+  function chooseGroup(g) {
+    setGroupPick(g);
+    localSet("razar_group", g);
+    setSelectedLessonId(null);   // a masik csoportban mas alkalmak vannak
   }
 
   function chooseMyKid(id) {
@@ -885,6 +904,31 @@ export default function App() {
         </div>
       )}
 
+      {groups.length > 1 && (
+        <div
+          className="sticky z-20 px-4 py-2.5 flex gap-2"
+          style={{ top: 64, background: "rgba(10,10,11,0.92)", backdropFilter: "blur(10px)", borderBottom: `1px solid ${C.border}` }}
+        >
+          {groups.map((g) => {
+            const on = g === group;
+            return (
+              <button
+                key={g}
+                onClick={() => chooseGroup(g)}
+                className="flex-1 py-2 rounded-xl text-[13px] font-bold transition active:scale-[0.97]"
+                style={{
+                  background: on ? C.lime : C.card,
+                  color: on ? "#0A0A0B" : C.muted,
+                  border: `1px solid ${on ? C.lime : C.border}`,
+                }}
+              >
+                {g}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className="px-4 pt-4 space-y-4">
         {tab === "lesson" && renderLessonView()}
         {tab === "kids" && renderKids()}
@@ -942,7 +986,7 @@ export default function App() {
       {kidModal && (
         <KidForm
           draft={kidModal}
-          groups={settings.groups}
+          groups={groups}
           onClose={() => setKidModal(null)}
           onSave={async (d) => { const ok = await saveKid(d); if (ok) setKidModal(null); }}
           onDelete={kidModal.id ? async () => {
@@ -956,7 +1000,7 @@ export default function App() {
       {lessonModal && (
         <LessonForm
           draft={lessonModal}
-          groups={settings.groups}
+          groups={groups}
           onClose={() => setLessonModal(null)}
           onSave={async (d) => { const ok = await saveLesson(d); if (ok) setLessonModal(null); }}
           onSeries={async (d, weeks) => { const ok = await createSeries(d, weeks); if (ok) setLessonModal(null); }}
@@ -970,7 +1014,8 @@ export default function App() {
 
       {signupOpen && (
         <SignupForm
-          groups={settings.groups}
+          groups={groups}
+          preset={group}
           onClose={() => setSignupOpen(false)}
           onSave={async (d) => {
             const ok = await submitSignup(d);
@@ -1242,7 +1287,7 @@ export default function App() {
             <Btn tone="primary" className="flex-1" onClick={() => setLessonModal({
               date: nextWeekdayISO(2), start_time: "16:00", end_time: "16:50",
               location: info.location.split("\n")[0] || "Óbudai Jégpálya",
-              group_name: settings.groups[0] || "U8-10", status: "open",
+              group_name: group, status: "open",
             })}>
               <span className="inline-flex items-center gap-1.5"><Plus size={15} /> Új alkalom</span>
             </Btn>
@@ -1330,7 +1375,7 @@ export default function App() {
 
         {isCoach && (
           <Btn tone="primary" className="w-full" onClick={() => setKidModal({
-            name: "", group_name: settings.groups[0] || "U8-10", parent_name: "",
+            name: "", group_name: group, parent_name: "",
             parent_phone: "", parent_email: "", billing_name: "", billing_address: "",
             is_active: true, note: "",
           })}>
@@ -1339,8 +1384,10 @@ export default function App() {
         )}
 
         <div className="space-y-2">
-          {kids.length === 0 && <Card><Empty>Még nincs felvéve gyerek.</Empty></Card>}
-          {kids.map((k) => (
+          {groupKids.length === 0 && (
+            <Card><Empty>Ebben a csoportban ({group}) még nincs felvéve gyerek.</Empty></Card>
+          )}
+          {groupKids.map((k) => (
             <div key={k.id} className="rounded-2xl px-3 py-3"
               style={{ background: C.card, border: `1px solid ${C.border}`, opacity: k.is_active === false ? 0.5 : 1 }}>
               <div className="flex items-center gap-3">
@@ -1665,9 +1712,9 @@ export default function App() {
     // Osszesito gyerekenkent. Nem csak a mar rogzitett fizeteseket nezi:
     // minden lezart alkalmat vegigszamol, amelyen a gyerek ott volt, igy
     // az is tartozasnak szamit, amihez meg hozza sem nyultunk.
-    const summary = kids.map((k) => {
+    const summary = groupKids.map((k) => {
       let owed = 0, paid = 0;
-      lessons.forEach((l) => {
+      groupLessons.forEach((l) => {
         if (attIndex[`${l.id}|${k.id}`] !== "yes") return;
         if (l.status === "cancelled") return;
         if (!isClosed(l, now)) return;                 // a jovobeli orak meg nem tartozasok
@@ -1687,7 +1734,7 @@ export default function App() {
     const totalOwed = summary.reduce((s, r) => s + r.owed, 0) + berletTartozas;
 
     const attendingKids = lesson
-      ? kids.filter((k) => attIndex[`${lesson.id}|${k.id}`] === "yes")
+      ? groupKids.filter((k) => attIndex[`${lesson.id}|${k.id}`] === "yes")
       : [];
     const tier = lesson ? tierFor(headcountOf(lesson.id), pricing) : null;
 
@@ -2038,9 +2085,9 @@ function BillingForm({ kid, saved, onClose, onSave }) {
   );
 }
 
-function SignupForm({ groups, onClose, onSave }) {
+function SignupForm({ groups, preset, onClose, onSave }) {
   const [d, setD] = useState({
-    kid_name: "", group_name: (groups && groups[0]) || "U8-10",
+    kid_name: "", group_name: preset || (groups && groups[0]) || "U8-10",
     parent_name: "", parent_phone: "", parent_email: "",
     billing_name: "", billing_address: "", note: "",
   });
